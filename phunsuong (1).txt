@@ -1,0 +1,208 @@
+#define BLYNK_TEMPLATE_ID "TMPL6hxy5H-jj"
+#define BLYNK_TEMPLATE_NAME "haq"
+#define BLYNK_AUTH_TOKEN "2fYYz9ECNTT5eUXboKxN8zXQ-r-EtI36"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+
+const char* ssid = "Luan";
+const char* pass = "12345678";
+unsigned long last_time;
+unsigned long lastDebounceTime = 0;
+float nhietdo=30;
+float doam=40;
+
+#define ON_OFF 26
+#define MODE 25
+#define EN_PIN 27
+#define EN 33
+#define MODE_PIN 14
+#define BUTTON_PIN 12
+#define RELAY_PIN 13
+float ratio[] = {
+    3.82, 4.15, 4.49, 4.86, 5.26, 5.26,
+    5.69, 6.16, 6.65, 7.18, 7.75, 8.36,
+    9.01, 9.71, 10.46, 10.46, 11.26, 12.12,
+    13.03, 14.01, 15.06, 16.17, 17.37, 18.64,
+    20.00, 20.00, 21.45, 22.99, 24.64, 26.40,
+    28.27, 30.27, 32.41, 34.68, 37.10, 37.10,
+    39.68, 42.44, 45.37
+};
+
+TimerHandle_t myTimer; // Handle của timer
+volatile bool on_off = false;
+volatile bool manual_auto = false;
+volatile bool en = false;
+SemaphoreHandle_t sema_auto;
+SemaphoreHandle_t sema_manual;
+SemaphoreHandle_t control;
+
+void TimerCallback(TimerHandle_t xTimer) {
+  if((!manual_auto)&&( digitalRead(RELAY_PIN))){
+     Serial.println("callback tắt máy");
+     Serial.println(millis());
+     digitalWrite(RELAY_PIN,0);
+     Serial.println("callback GIVE control");
+     //xSemaphoreGive(control);
+  }
+}
+void IRAM_ATTR button_on_off() {// ISR xử lý nút nhấn
+     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+     if (millis() - lastDebounceTime > 150) {
+     xSemaphoreGiveFromISR(control, &xHigherPriorityTaskWoken); // Cấp semaphore từ ngắt
+    on_off = !on_off; // Đảo trạng thái
+    //if (xHigherPriorityTaskWoken == pdTRUE) { 
+      lastDebounceTime = millis(); // Cập nhật thời gian ngắt cuối
+       }
+             portYIELD_FROM_ISR();  // Đảm bảo task có thể chạy ngay lập tức nếu cần
+    }
+ void IRAM_ATTR mode_manual_auto() {
+     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+     if ( millis() - lastDebounceTime > 150) {
+    xSemaphoreGiveFromISR(control, &xHigherPriorityTaskWoken); // Cấp semaphore từ ngắt
+    manual_auto = !manual_auto; // Đảo trạng thái
+    //if (xHigherPriorityTaskWoken == pdTRUE) {
+        lastDebounceTime = millis(); // Cập nhật thời gian ngắt cuối
+    }
+    portYIELD_FROM_ISR();
+}
+ void IRAM_ATTR en_auto() {
+      BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+     if (millis() - lastDebounceTime > 150) {
+      xSemaphoreGiveFromISR(control, &xHigherPriorityTaskWoken); // Cấp semaphore từ ngắt
+    lastDebounceTime = millis(); // Cập nhật thời gian ngắt cuối
+    en = !en; // Đảo trạng thái
+    //if (xHigherPriorityTaskWoken == pdTRUE) {
+    }
+            portYIELD_FROM_ISR();  // Đảm bảo task có thể chạy ngay lập tức nếu cần
+}
+
+BLYNK_WRITE(V0) { // Nhận tín hiệu từ virtual pin V1
+    bool blynkState = param.asInt(); // Lấy trạng thái từ Blynk
+    // Cấp semaphore để thay đổi trạng thái máy
+    //if (xSemaphoreTake(xStateSemaphore, portMAX_DELAY)) {
+        on_off = blynkState;  // Cập nhật trạng thái máy
+        xSemaphoreGive(control);  // Trả lại semaphore
+        Serial.println(blynkState ? "on_off: ON" : "on_off:  OFF");
+        vTaskDelay(100);
+    //}
+}
+
+BLYNK_WRITE(V3) { // Nhận tín hiệu từ virtual pin V1
+    bool blynkState = param.asInt(); // Lấy trạng thái từ Blynk
+    // Cấp semaphore để thay đổi trạng thái máy
+    //if (xSemaphoreTake(xStateSemaphore, portMAX_DELAY)) {
+        manual_auto = blynkState;  // Cập nhật trạng thái máy
+        xSemaphoreGive(control);  // Trả lại semaphore
+        Serial.println(blynkState ? "mode:  manual" : "mode:  auto");
+    //}
+    vTaskDelay(100);
+}
+
+// Task xử lý trạng thái máy
+void task_manual(void* arg) {
+    while (1) {
+        if (xSemaphoreTake(sema_manual, portMAX_DELAY)) {
+                digitalWrite(RELAY_PIN, on_off);  
+                Serial.println(on_off ? "manual ON" : "manual OFF");
+                last_time = millis();
+        }
+    }
+}
+
+// volatile bool on_off = false;
+// volatile bool manual_auto = false;
+// volatile bool en = false;
+void task_control(void* arg) {
+    while (1) {
+      if (xSemaphoreTake(control, portMAX_DELAY) == pdTRUE) {
+        digitalWrite(EN,en);
+        digitalWrite(ON_OFF,on_off);
+        digitalWrite(MODE,manual_auto);
+        if (manual_auto) {
+            Serial.println("GIVE sema_manual");
+            xSemaphoreGive(sema_manual);  
+        }else if ((!manual_auto)&&(en)){
+          xSemaphoreGive(sema_auto);  
+          Serial.println("GIVE sema_auto");
+        }else{ digitalWrite(RELAY_PIN, 0);
+        }
+    }
+  }
+}
+
+void task_auto(void* arg) {
+  last_time = millis();
+    while (1) {
+        if (xSemaphoreTake(sema_auto, portMAX_DELAY)) {
+          if(millis()- (last_time +5000) > 0){
+                if(doam <= 45){
+                unsigned int a =(45-doam)*(1.0/100)*(ratio[(int)nhietdo])*(245.0/2)*(1.0/2)*(1.0/300)*(60*1000);
+                unsigned int t=10000;
+                Serial.printf("thoi gian phun: ");  Serial.print(a); Serial.println("ms"); 
+                on_off=1;    
+                digitalWrite(RELAY_PIN, on_off);  
+                Serial.println(on_off ? "auto ON" : "auto OFF");
+                last_time = t + millis();
+                if (myTimer != NULL) {
+                   xTimerDelete(myTimer, 0);  // Xóa timer cũ
+                  }
+                myTimer = xTimerCreate("MyTimer", pdMS_TO_TICKS(t), pdFALSE, (void*)0, TimerCallback);
+                    if (myTimer == NULL) {
+                     Serial.println("Không thể tạo timer.");
+                     return;
+                  }
+                    if (xTimerStart(myTimer, 0) != pdPASS) {
+                    Serial.println("Không thể bắt đầu timer.");
+                    return;
+                  }
+            }   
+        }
+      }  
+    }
+}
+
+void blynk_Task(void* arg) {
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);// Kết nối WiFi và Blynk
+    while (1) {
+       Blynk.run();
+       Blynk.virtualWrite(V2, nhietdo);
+       Blynk.virtualWrite(V1, doam);
+       Blynk.virtualWrite(V3, manual_auto);
+       Blynk.virtualWrite(V0, on_off);
+       vTaskDelay(100);
+    }
+}
+
+void setup() { 
+    Serial.begin(115200);
+    
+    Serial.println("Setup complete2.");
+    pinMode(EN_PIN, INPUT_PULLUP);
+    pinMode(ON_OFF, OUTPUT);
+    pinMode(EN, OUTPUT);
+    pinMode(MODE, OUTPUT);
+    pinMode(MODE_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(RELAY_PIN, OUTPUT);
+    Serial.println("Setup complete3.");
+    sema_auto = xSemaphoreCreateBinary();
+    sema_manual= xSemaphoreCreateBinary();
+    control = xSemaphoreCreateBinary();
+    //on_off= xSemaphoreCreateBinary();
+    attachInterrupt(BUTTON_PIN, button_on_off, FALLING); // Gắn ngắt ngoài cho nút nhấn
+    attachInterrupt(MODE_PIN, mode_manual_auto, FALLING); // Gắn ngắt ngoài cho nút nhấn
+    attachInterrupt(EN_PIN, en_auto, FALLING);
+    //xTaskCreate(read_sensor,"Task_sensor",2048,NULL,2,NULL);
+    Serial.println("Setup complete4.");
+    xTaskCreate(task_manual,"Task_on_offf",4098,NULL,2,NULL);
+    xTaskCreate(task_control,"Task_control",4098,NULL,2,NULL);
+    xTaskCreate(task_auto,"Task_mode",4098,NULL,2,NULL);
+    Serial.println("Setup complete5.");
+    xTaskCreate(blynk_Task,"Task_blynk",4098,NULL,3,NULL); 
+    digitalWrite(RELAY_PIN, on_off);// Khởi tạo trạng thái ban đầu
+    Blynk.virtualWrite(V0, on_off); // Đồng bộ trạng thái ban đầu
+    Serial.println("Setup complete.");
+     Serial.println(on_off);
+}
+void loop() {}
